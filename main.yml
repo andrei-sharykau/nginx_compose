@@ -1,0 +1,52 @@
+#
+# Run playbook:
+# ansible-playbook nginx_compose/main.yml -l <host> -e @vars.yml
+#
+---
+- name: Deploy nginx + certbot via Docker Compose
+  hosts: all
+  gather_facts: true
+  become: true
+
+  vars:
+    nginx_compose_dir: /opt/nginx-compose
+    nginx_compose_email: ""
+    nginx_compose_staging: false
+    nginx_compose_nginx_image: nginx:stable-alpine
+    nginx_compose_certbot_image: certbot/certbot:latest
+    nginx_compose_domains: []
+    nginx_compose_default_robots: |
+      User-agent: *
+      Disallow: /
+
+  tasks:
+    - name: Assert required variables
+      ansible.builtin.assert:
+        that:
+          - nginx_compose_email | length > 0
+          - nginx_compose_domains | length > 0
+        fail_msg: >-
+          Set nginx_compose_email and nginx_compose_domains
+          (e.g. -e @vars.yml)
+
+    - name: Assert each domain has name and locations
+      ansible.builtin.assert:
+        that:
+          - item.name is defined
+          - item.name | length > 0
+          - item.locations is defined
+          - item.locations | length > 0
+        fail_msg: "Domain entry needs name and locations (raw nginx block)"
+      loop: "{{ nginx_compose_domains }}"
+      loop_control:
+        label: "{{ item.name | default('unnamed') }}"
+
+    - name: Deploy compose stack and base config
+      ansible.builtin.import_tasks: tasks/deploy.yml
+
+    - name: Configure domains (HTTP → certbot → HTTPS)
+      ansible.builtin.include_tasks: tasks/domains.yml
+      loop: "{{ nginx_compose_domains }}"
+      loop_control:
+        loop_var: domain
+        label: "{{ domain.name }}"

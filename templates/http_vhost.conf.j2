@@ -1,0 +1,17 @@
+# HTTP-only vhost (ACME + stub). Managed by nginx_compose playbook.
+# Domain: {{ domain.name }}
+# No auth / no app locations — used only until certificate is issued.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ domain.name }}{% for a in domain.aliases | default([]) %} {{ a }}{% endfor %};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 404;
+    }
+}

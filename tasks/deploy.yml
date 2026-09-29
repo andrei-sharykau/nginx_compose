@@ -1,0 +1,142 @@
+---
+- name: Assert Docker and Compose are available
+  ansible.builtin.command: docker compose version
+  register: nginx_compose_docker_check
+  changed_when: false
+
+- name: Create directory tree
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop:
+    - "{{ nginx_compose_dir }}"
+    - "{{ nginx_compose_dir }}/conf"
+    - "{{ nginx_compose_dir }}/conf/conf.d"
+    - "{{ nginx_compose_dir }}/html"
+    - "{{ nginx_compose_dir }}/auth"
+    - "{{ nginx_compose_dir }}/certbot"
+    - "{{ nginx_compose_dir }}/certbot/conf"
+    - "{{ nginx_compose_dir }}/certbot/www"
+    - "{{ nginx_compose_dir }}/logs"
+
+- name: Create per-domain html directories
+  ansible.builtin.file:
+    path: "{{ nginx_compose_dir }}/html/{{ item.name }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  loop: "{{ nginx_compose_domains }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Deploy docker-compose.yml
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/docker-compose.yml.j2"
+    dest: "{{ nginx_compose_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Check if nginx.conf already exists
+  ansible.builtin.stat:
+    path: "{{ nginx_compose_dir }}/conf/nginx.conf"
+  register: nginx_compose_nginx_conf_stat
+
+- name: Deploy default nginx.conf (only if missing)
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/nginx.conf.j2"
+    dest: "{{ nginx_compose_dir }}/conf/nginx.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: not nginx_compose_nginx_conf_stat.stat.exists
+
+- name: Ensure openssl is available for htpasswd
+  ansible.builtin.package:
+    name: openssl
+    state: present
+  when: >-
+    nginx_compose_domains
+    | selectattr('basic_auth', 'defined')
+    | map(attribute='basic_auth')
+    | selectattr('enabled', 'defined')
+    | selectattr('enabled', 'truthy')
+    | list
+    | length > 0
+
+- name: Generate htpasswd files for domains with basic_auth
+  ansible.builtin.shell: |
+    set -euo pipefail
+    dest="{{ nginx_compose_dir }}/auth/{{ item.name }}.htpasswd"
+    tmp="$(mktemp)"
+    {% for user in item.basic_auth.users %}
+    printf '%s:%s\n' {{ user.name | quote }} "$(openssl passwd -apr1 {{ user.password | quote }})" >> "$tmp"
+    {% endfor %}
+    if [ ! -f "$dest" ] || ! cmp -s "$tmp" "$dest"; then
+      install -m 0644 -o root -g root "$tmp" "$dest"
+      echo CHANGED
+    else
+      echo OK
+    fi
+    rm -f "$tmp"
+  args:
+    executable: /bin/bash
+  loop: "{{ nginx_compose_domains }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - item.basic_auth is defined
+    - item.basic_auth.enabled | default(false)
+    - item.basic_auth.users is defined
+    - item.basic_auth.users | length > 0
+  register: nginx_compose_htpasswd
+  changed_when: "'CHANGED' in nginx_compose_htpasswd.stdout"
+  no_log: true
+
+- name: Deploy robots.txt for each domain
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/robots.txt.j2"
+    dest: "{{ nginx_compose_dir }}/html/{{ item.name }}/robots.txt"
+    owner: root
+    group: root
+    mode: "0644"
+  vars:
+    domain: "{{ item }}"
+  loop: "{{ nginx_compose_domains }}"
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Place temporary default server so nginx can start before certs
+  ansible.builtin.copy:
+    dest: "{{ nginx_compose_dir }}/conf/conf.d/00-default.conf"
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      server {
+          listen 80 default_server;
+          listen [::]:80 default_server;
+          server_name _;
+          location /.well-known/acme-challenge/ {
+              root /var/www/certbot;
+          }
+          location / {
+              return 404;
+          }
+      }
+    force: false
+
+- name: Start compose stack
+  ansible.builtin.command:
+    cmd: docker compose -f {{ nginx_compose_dir }}/docker-compose.yml up -d
+    chdir: "{{ nginx_compose_dir }}"
+  register: nginx_compose_up
+  changed_when: >-
+    'Created' in nginx_compose_up.stdout
+    or 'Started' in nginx_compose_up.stdout
+    or 'Recreate' in nginx_compose_up.stdout
+    or 'Building' in nginx_compose_up.stdout

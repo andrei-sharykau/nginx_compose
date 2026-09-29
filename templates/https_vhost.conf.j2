@@ -1,0 +1,44 @@
+# HTTPS vhost + HTTP→HTTPS redirect. Managed by nginx_compose playbook.
+# Domain: {{ domain.name }}
+# basic_auth (if enabled) applies only on :443 after TLS is up.
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ domain.name }}{% for a in domain.aliases | default([]) %} {{ a }}{% endfor %};
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name {{ domain.name }}{% for a in domain.aliases | default([]) %} {{ a }}{% endfor %};
+
+    ssl_certificate     /etc/letsencrypt/live/{{ domain.name }}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{{ domain.name }}/privkey.pem;
+    ssl_session_cache   shared:SSL:10m;
+    ssl_session_timeout 1d;
+    ssl_protocols       TLSv1.2 TLSv1.3;
+
+    location = /robots.txt {
+        root /var/www/html/{{ domain.name }};
+{% if domain.basic_auth is defined and domain.basic_auth.enabled | default(false) %}
+        auth_basic off;
+{% endif %}
+    }
+
+{% if domain.basic_auth is defined and domain.basic_auth.enabled | default(false) %}
+    auth_basic "{{ domain.basic_auth.realm | default('Restricted') }}";
+    auth_basic_user_file /etc/nginx/auth/{{ domain.name }}.htpasswd;
+{% endif %}
+
+{{ domain.locations }}
+}

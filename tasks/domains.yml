@@ -1,0 +1,114 @@
+---
+# Expects loop_var: domain (from main.yml include_tasks)
+
+- name: "Check if certificate exists for {{ domain.name }}"
+  ansible.builtin.stat:
+    path: "{{ nginx_compose_dir }}/certbot/conf/live/{{ domain.name }}/fullchain.pem"
+  register: nginx_compose_cert_stat
+
+- name: "Ensure htpasswd exists when basic_auth enabled ({{ domain.name }})"
+  ansible.builtin.stat:
+    path: "{{ nginx_compose_dir }}/auth/{{ domain.name }}.htpasswd"
+  register: nginx_compose_domain_htpasswd_stat
+  when:
+    - domain.basic_auth is defined
+    - domain.basic_auth.enabled | default(false)
+
+- name: "Fail if basic_auth enabled but htpasswd missing ({{ domain.name }})"
+  ansible.builtin.assert:
+    that:
+      - nginx_compose_domain_htpasswd_stat.stat.exists
+    fail_msg: >-
+      basic_auth enabled for {{ domain.name }} but
+      {{ nginx_compose_dir }}/auth/{{ domain.name }}.htpasswd is missing
+  when:
+    - domain.basic_auth is defined
+    - domain.basic_auth.enabled | default(false)
+
+- name: "Deploy robots.txt for {{ domain.name }}"
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/robots.txt.j2"
+    dest: "{{ nginx_compose_dir }}/html/{{ domain.name }}/robots.txt"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: "Deploy HTTP vhost for ACME ({{ domain.name }})"
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/http_vhost.conf.j2"
+    dest: "{{ nginx_compose_dir }}/conf/conf.d/{{ domain.name }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  when: not nginx_compose_cert_stat.stat.exists
+  register: nginx_compose_http_vhost
+
+- name: "Test nginx config after HTTP vhost ({{ domain.name }})"
+  ansible.builtin.command:
+    cmd: docker compose -f {{ nginx_compose_dir }}/docker-compose.yml exec -T nginx nginx -t
+    chdir: "{{ nginx_compose_dir }}"
+  when:
+    - not nginx_compose_cert_stat.stat.exists
+    - nginx_compose_http_vhost is changed
+  changed_when: false
+
+- name: "Reload nginx after HTTP vhost ({{ domain.name }})"
+  ansible.builtin.command:
+    cmd: docker compose -f {{ nginx_compose_dir }}/docker-compose.yml exec -T nginx nginx -s reload
+    chdir: "{{ nginx_compose_dir }}"
+  when:
+    - not nginx_compose_cert_stat.stat.exists
+    - nginx_compose_http_vhost is changed
+
+- name: "Issue Let's Encrypt certificate for {{ domain.name }}"
+  ansible.builtin.shell: |
+    set -euo pipefail
+    extra=()
+    {% if nginx_compose_staging %}
+    extra+=(--staging)
+    {% endif %}
+    docker compose -f {{ nginx_compose_dir | quote }}/docker-compose.yml \
+      --profile certbot \
+      run --rm --entrypoint certbot \
+      certbot certonly \
+      --webroot -w /var/www/certbot \
+      --email {{ nginx_compose_email | quote }} \
+      --agree-tos \
+      --non-interactive \
+      --cert-name {{ domain.name | quote }} \
+    {% for d in [domain.name] + (domain.aliases | default([])) %}
+      -d {{ d | quote }} \
+    {% endfor %}
+      "${extra[@]}"
+  args:
+    chdir: "{{ nginx_compose_dir }}"
+    executable: /bin/bash
+  when: not nginx_compose_cert_stat.stat.exists
+  register: nginx_compose_certbot_issue
+
+- name: "Deploy HTTPS vhost for {{ domain.name }}"
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/templates/https_vhost.conf.j2"
+    dest: "{{ nginx_compose_dir }}/conf/conf.d/{{ domain.name }}.conf"
+    owner: root
+    group: root
+    mode: "0644"
+  register: nginx_compose_https_vhost
+  when: >-
+    nginx_compose_cert_stat.stat.exists
+    or (nginx_compose_certbot_issue is defined
+        and nginx_compose_certbot_issue is not skipped
+        and nginx_compose_certbot_issue.rc == 0)
+
+- name: "Test nginx config before reload ({{ domain.name }})"
+  ansible.builtin.command:
+    cmd: docker compose -f {{ nginx_compose_dir }}/docker-compose.yml exec -T nginx nginx -t
+    chdir: "{{ nginx_compose_dir }}"
+  when: nginx_compose_https_vhost is changed
+  changed_when: false
+
+- name: "Reload nginx after HTTPS vhost ({{ domain.name }})"
+  ansible.builtin.command:
+    cmd: docker compose -f {{ nginx_compose_dir }}/docker-compose.yml exec -T nginx nginx -s reload
+    chdir: "{{ nginx_compose_dir }}"
+  when: nginx_compose_https_vhost is changed

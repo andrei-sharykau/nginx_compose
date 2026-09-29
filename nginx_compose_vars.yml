@@ -1,0 +1,36 @@
+---
+nginx_compose_dir: /opt/nginx-compose
+nginx_compose_email: admin@example.com
+nginx_compose_staging: false   # true — Let's Encrypt staging
+
+nginx_compose_domains:
+  - name: example.com
+    aliases:
+      - www.example.com
+    basic_auth:
+      enabled: true
+      realm: Restricted
+      users:
+        - name: user1
+          password: "change-me"
+    robots: |
+      User-agent: *
+      Disallow: /
+    locations: |
+      location / {
+          proxy_pass http://172.17.0.1:8080;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto $scheme;
+      }
+
+  - name: app.example.com
+    robots: |
+      User-agent: *
+      Allow: /
+    locations: |
+      location / {
+          proxy_pass http://172.17.0.1:9000;
+          proxy_set_header Host $host;
+      }
